@@ -10,6 +10,7 @@ open Aardvark.UI
 open Aardvark.UI.Primitives
 open Aardvark.Application
 open Aardvark.Rendering.Text
+open System.Text.Json
 
 open punktEinzeichner.Model
 
@@ -41,7 +42,7 @@ module App =
             let us = 
                 match s with 
                 | None -> Nop
-                | Some path -> ParseFromJson
+                | Some _ -> ParseFromJson
             update {model with PhotoFilename=s} us
         | AddControlPoint(ndc,px) -> 
             match model.PhotoFilename with
@@ -159,11 +160,61 @@ module App =
         | UpdateControlPointName (idx,newName) -> 
             {model with ControlPoints=model.ControlPoints |> HashMap.alter idx (Option.map (fun cp -> {cp with Name=newName}))}
         | WriteToJson ->
-            Log.warn "write to json"
-            model
+            let cps = model.ControlPoints |> HashMap.toList
+            match cps with 
+            | [] -> model
+            | _ -> 
+                match model.PhotoFilename with 
+                | None -> model
+                | Some photoPath ->
+                    let photoFile = Path.GetFileNameWithoutExtension photoPath
+                    let photoDir = Path.GetDirectoryName(photoPath)
+                    let jsonFile = photoFile + "_points.json"
+                    Log.warn "write %d points to %s" cps.Length jsonFile
+                    let jsonPath = Path.combine [photoDir;jsonFile]
+                    let data =
+                        cps |> List.map (fun (_,cp) -> 
+                            {|
+                                name = cp.Name
+                                ndcX = cp.NdcPos.X
+                                ndcY = cp.NdcPos.Y
+                                pxX = cp.PixelPos.X
+                                pxY = cp.PixelPos.Y
+                            |}
+                        )
+                    let json = JsonSerializer.Serialize data
+                    File.writeAllText jsonPath json
+                    model
         | ParseFromJson -> 
-            Log.warn "parseFromJson"
-            model
+            match model.PhotoFilename with 
+            | None -> model
+            | Some photoPath ->
+                let photoFile = Path.GetFileNameWithoutExtension photoPath
+                let photoDir = Path.GetDirectoryName(photoPath)
+                let jsonFile = photoFile + "_points.json"
+                let jsonPath = Path.combine [photoDir;jsonFile]
+                if File.Exists(jsonPath) then 
+                    try 
+                        Log.warn "try parse from %s" jsonFile
+                        let json = File.readAllText jsonPath
+                        let data : System.Collections.Generic.List<{|name:string;ndcX:float;ndcY:float;pxX:int;pxY:int|}> = JsonSerializer.Deserialize json
+                        let mutable li = 0
+                        let hm =
+                            data |> CSharpList.toList |> List.mapi (fun i e -> 
+                                li<-i
+                                i,{
+                                    InternalIndex=i
+                                    NdcPos=V2d(e.ndcX,e.ndcY)
+                                    PixelPos=V2i(e.pxX,e.pxY)
+                                    ParentPhotoName=photoFile
+                                    Name=e.name
+                                }
+                            )|> HashMap.ofList
+                        {model with ControlPoints=hm;CurrentIndex=li+1}
+                    with e -> 
+                        Log.error "[deserialize] %A" e
+                        model
+                else model
         | Nop -> 
             model
         | IncreaseZoomFactor -> 
@@ -210,7 +261,7 @@ var dropped =
             for(let f of e.dataTransfer.files) {
                 arr.push(f.path);
             }
-            if(arr.length>0){
+            if(arr.length>0){ 
                 window.aardvark.processEvent('__ID__',"drop",arr);
             }
         }
