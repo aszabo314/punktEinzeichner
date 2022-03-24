@@ -9,6 +9,7 @@ open Aardvark.Rendering
 open Aardvark.UI
 open Aardvark.UI.Primitives
 open Aardvark.Application
+open Aardvark.Rendering.Text
 
 open punktEinzeichner.Model
 
@@ -33,7 +34,7 @@ type Message =
 
 
 module App =
-    
+    let mutable hackysizeBlurg : V2i = V2i(1024,1024)
     let rec update (model : Model) (msg : Message) =
         match msg with
         | SetPhotoFilename s ->
@@ -76,6 +77,7 @@ module App =
                     MouseDragStart=Model.initial.MouseDragStart
                     MouseDragCurrent=Model.initial.MouseDragCurrent
                     CurrentMousePosition=Model.initial.CurrentMousePosition
+                    MouseDragPreview=Model.initial.MouseDragPreview
                 }
             | Some (ndc,px) ->
                 match model.MouseDragStart with 
@@ -90,7 +92,7 @@ module App =
                         | [] -> None
                         | [(_,cp)] -> Some cp.InternalIndex
                         | _ -> cands |> List.sortBy fst |> List.head |> snd |> (fun cp -> cp.InternalIndex) |> Some
-                    {model with CurrentlyHoveredPoint=currentlyHovered;CurrentMousePosition=(ndc,px)}
+                    update {model with CurrentMousePosition=(ndc,px)} (SetCurrentlyHoveredPoint currentlyHovered)
                 | Some _ ->
                     let newModel = {model with CurrentMousePosition=(ndc,px)}
                     match newModel.CurrentlyHoveredPoint with 
@@ -108,9 +110,11 @@ module App =
                         | None -> cp
                         | Some oldDragged -> 
                             let ndcDir = dragCurrentNdc - dragStartNdc 
-                            let newNdc = oldDragged.NdcPos + ndcDir
+                            let newNdcUnclamped = cp.NdcPos + ndcDir
+                            let newNdc = V2d(clamp 0.0 1.0 newNdcUnclamped.X, clamp 0.0 1.0 newNdcUnclamped.Y)
                             let pxDir = dragCurrentPx - dragStartPx
-                            let newPx = oldDragged.PixelPos + pxDir
+                            let newPxUnclamped = cp.PixelPos + pxDir
+                            let newPx = V2i(clamp 0 hackysizeBlurg.X newPxUnclamped.X, clamp 0 hackysizeBlurg.Y newPxUnclamped.Y)
                             {oldDragged with NdcPos=newNdc; PixelPos=newPx}
                     {model with MouseDragPreview=Some dragPreview}
                 | None -> model
@@ -225,7 +229,9 @@ registerDrop(dropped);
 
         let imgSizes =
             pimg |> AVal.map (fun img -> 
-                img |> Option.map (fun pi -> pi.Size) |> Option.defaultValue (V2i(1024,1024))
+                let s = img |> Option.map (fun pi -> pi.Size) |> Option.defaultValue (V2i(1024,1024))
+                hackysizeBlurg <- s
+                s
             )
         let zoomedImgSizes =
             (m.zoomFactor,imgSizes) ||> AVal.map2 (fun z s -> V2i(int (float s.X * z),int (float s.Y * z)))
@@ -271,6 +277,31 @@ registerDrop(dropped);
                 |> Sg.diffuseTexture itexture
             let pass1 = (RenderPass.after "asds" RenderPassOrder.Arbitrary RenderPass.main)
             let pass2 = (RenderPass.after "asdgags" RenderPassOrder.Arbitrary pass1)
+            let textSg =
+                let font = Font.create "Arial" FontStyle.Regular
+                let col = C4b.White
+                let cfg = TextConfig.create font col TextAlignment.Left true RenderStyle.Billboard
+                let trafosTexts = 
+                    m.ControlPoints |> AMap.toAVal |> AVal.map (fun hm -> 
+                        hm |> Seq.map (fun (idx,cp) -> 
+                            let x = cp.NdcPos.X*2.0-1.0
+                            let y = -cp.NdcPos.Y*2.0+1.0
+                            let shift = V2d(0.01,0.01)
+                            let trafo = 
+                                AVal.constant (
+                                    Trafo3d.Scale 0.05 *
+                                    Trafo3d.Translation (V3d(x+shift.X, y+shift.Y, 1.0))
+                                )
+                            let text = AVal.constant cp.Name
+                            trafo,text
+                        )
+                    ) |> ASet.ofAVal
+                Sg.textsWithConfig cfg trafosTexts
+                |> Sg.noEvents
+                |> Sg.onOff m.ctrlDown
+                |> Sg.depthTest (AVal.constant DepthTest.None)
+                |> Sg.blendMode (AVal.constant BlendMode.Blend)
+                |> Sg.pass pass2
             let vertsSgGreen =
                 Sg.draw IndexedGeometryMode.PointList
                 |> Sg.vertexAttribute DefaultSemantic.Positions verts
@@ -296,7 +327,7 @@ registerDrop(dropped);
                 |> Sg.depthTest (AVal.constant DepthTest.None)
                 |> Sg.blendMode (AVal.constant BlendMode.Blend)
                 |> Sg.pass pass1
-            Sg.ofList [picSg; vertsSgBlack; vertsSgGreen]
+            Sg.ofList [picSg; vertsSgBlack; vertsSgGreen;textSg]
             |> Sg.viewTrafo' Trafo3d.Identity
             |> Sg.projTrafo' Trafo3d.Identity
 
@@ -321,8 +352,28 @@ registerDrop(dropped);
             )
 
         let cpTable = 
-            Incremental.table (AttributeMap.ofList [clazz "cpTable"]) (m.ControlPoints |> AMap.toASet |> ASet.sortBy fst |> AList.map (fun (idx,cp) -> 
-                Incremental.tr (AttributeMap.ofAList (AList.ofAVal (m.CurrentlyHoveredPoint |> AVal.map (function None -> [] | Some hIdx -> if hIdx=idx then [clazz "highlighted"] else [])))) (AList.ofList [
+            let tableAtts =
+                AttributeMap.ofList [
+                    clazz "cpTable"
+                    onMouseLeave (fun _ -> SetCurrentlyHoveredPoint None)
+                ]
+            Incremental.table tableAtts (m.ControlPoints |> AMap.toASet |> ASet.sortBy fst |> AList.map (fun (idx,cp) -> 
+                let rowAtts =
+                    (AttributeMap.ofAList (AList.ofAVal (
+                        m.CurrentlyHoveredPoint |> AVal.map (fun hp ->
+                            let cc = 
+                                match hp with 
+                                | None -> [clazz ""] 
+                                | Some hIdx -> 
+                                    if hIdx=idx then [clazz "highlighted"] 
+                                    else [clazz ""]
+                            let evts =
+                                [
+                                    onMouseEnter (fun _ -> SetCurrentlyHoveredPoint (Some idx))
+                                ]
+                            List.concat [cc;evts]
+                    ))))
+                Incremental.tr rowAtts (AList.ofList [
                     td [clazz "cpTd"] [button [onClick (fun _ -> RemoveControlPoint idx)] [text "❌"]]
                     td [clazz "cpTd"] [text (sprintf "ndc=(%.4f,%.4f) px=(%d,%d)" cp.NdcPos.X cp.NdcPos.Y cp.PixelPos.X cp.PixelPos.Y)]
                     td [clazz "cpTd"] [div [style "display:inline-block"] [
@@ -359,6 +410,7 @@ registerDrop(dropped);
                 onWheel (fun d -> if d.Y >= 0 then IncreaseZoomFactor else DecreaseZoomFactor)
                 onKeyDown (function Keys.LeftCtrl -> SetCtrlDown true | _ -> Nop)
                 onKeyUp (function Keys.LeftCtrl -> SetCtrlDown false | _ -> Nop)
+                style "overflow-y:visible;overflow-x:visible;"
             ]
 
         let statusText =

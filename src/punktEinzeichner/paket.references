@@ -10,6 +10,7 @@ Aardvark.Application.Slim
 Aardvark.Application.Slim.GL
 Aardvark.SceneGraph
 Aardvark.SceneGraph.IO
+Aardvark.Rendering.Text
 
 Aardvark.Service
 Aardvark.UI
