@@ -124,7 +124,7 @@ module App =
             if left then 
                 let dist = 
                     (Some model.CurrentMousePosition,model.MouseDownPosition) ||> Option.map2 (fun (_,ci) (_,si) -> float <| Vec.distance ci si) |> Option.defaultValue System.Double.PositiveInfinity
-                if dist < 2.0 then 
+                if dist < 1.0 then 
                     let newModel = update model (AddControlPoint model.CurrentMousePosition)
                     {newModel with 
                         MouseDragStart = Model.initial.MouseDragStart
@@ -213,8 +213,8 @@ module App =
                         {model with ControlPoints=hm;CurrentIndex=li+1}
                     with e -> 
                         Log.error "[deserialize] %A" e
-                        model
-                else model
+                        {model with ControlPoints=HashMap.empty;CurrentIndex=0}
+                else {model with ControlPoints=HashMap.empty;CurrentIndex=0}
         | Nop -> 
             model
         | IncreaseZoomFactor -> 
@@ -318,7 +318,6 @@ registerDrop(dropped);
                     Array.append cols [|C4f.Yellow|]
             )
 
-        //sg goes here
         let picViewSg = 
             let picSg = 
                 Sg.fullScreenQuad
@@ -466,11 +465,11 @@ registerDrop(dropped);
 
         let statusText =
             div [style "display:inline-block;"; clazz "descriptiontext"] [
-                div [] [text "Drop image here. "]
-                div [] [text "LMB to add control point. "]
+                div [] [text "Drop image here. LMB to add control point."]
                 Incremental.div (AttributeMap.ofAList (AList.ofAVal (m.ctrlDown |> AVal.map (fun b -> if b then [clazz "highlightedtext"] else [])))) (AList.ofList [
                     text "Ctrl+Scroll to zoom. "
                 ])
+                div [] [Incremental.text (m.PhotoFilename |> AVal.map (Option.map Path.GetFileNameWithoutExtension >> Option.defaultValue "No photo loaded."))]
             ]
 
         require requires (
