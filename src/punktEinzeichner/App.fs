@@ -246,7 +246,7 @@ module App =
                     with e -> 
                         Log.error "[deserialize] %A" e
                         {model with ControlPoints=HashMap.empty;CurrentIndex=0}
-                else {model with ControlPoints=HashMap.empty;CurrentIndex=0}
+                else model//{model with ControlPoints=HashMap.empty;CurrentIndex=0}
         | Nop -> 
             model
         | SetCtrlDown b -> 
