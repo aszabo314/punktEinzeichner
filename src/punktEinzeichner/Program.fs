@@ -12,6 +12,7 @@ open Aardvark.UI
 open Aardium
 open Suave
 open Suave.WebPart
+open punktEinzeichner
 
 type EmbeddedResources = EmbeddedResources
 
@@ -23,8 +24,12 @@ let main args =
 
     let app = new OpenGlApplication()
 
+    let mutable mysend = Unchecked.defaultof<Message -> unit>
+    
+    let mapp = App.start (App.app (fun m -> mysend m))
+    mysend <- Seq.singleton >> mapp.update Guid.Empty
     WebPart.startServerLocalhost 4325 [
-        MutableApp.toWebPart' app.Runtime false (App.start App.app)
+        MutableApp.toWebPart' app.Runtime false mapp
         Reflection.assemblyWebPart typeof<EmbeddedResources>.Assembly
     ] |> ignore
     

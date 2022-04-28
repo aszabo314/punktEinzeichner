@@ -13,37 +13,69 @@ open Aardvark.Rendering.Text
 open System.Text.Json
 
 open punktEinzeichner.Model
+open punktEinzeichner
 
 type Message = 
-    | AddControlPoint of V2d*V2i
+    | AddControlPoint of V2d*V2d
     | UpdateDraggedControlPointPosition
     | UpdateControlPointName of int*string
     | RemoveControlPoint of int
     | SetCurrentlyHoveredPoint of Option<int>
-    | SetMouseDragStart of Option<V2d*V2i>
-    | SetMouseDragCurrent of Option<V2d*V2i>
-    | SetMousePosition of Option<V2d*V2i>
-    | SetPhotoFilename of Option<string>
+    | SetMouseDragStart of Option<V2d*V2d>
+    | SetMouseDragCurrent of Option<V2d*V2d>
+    | SetMousePosition of Option<V2d*V2d>
+    | SetPhotoFilename of bool*Option<string>
     | MouseDown of bool //isLmb?
     | MouseUp of bool
-    | IncreaseZoomFactor
-    | DecreaseZoomFactor
     | SetCtrlDown of bool
     | WriteToJson
     | ParseFromJson
     | Nop
-
+    | CameraMessage of CameraController.Message
+    | NextFilename of bool //successor?
 
 module App =
-    let mutable hackysizeBlurg : V2i = V2i(1024,1024)
-    let rec update (model : Model) (msg : Message) =
+    let mutable hackysizeBlurg : V2d = V2d(1024,1024)
+    let rec update (send : Message -> unit) (model : Model) (msg : Message) =
+        let update = update send
         match msg with
-        | SetPhotoFilename s ->
-            let us = 
-                match s with 
-                | None -> Nop
-                | Some _ -> ParseFromJson
-            update {model with PhotoFilename=s} us
+        | NextFilename successor -> 
+            match model.PhotoFilename with
+            | Some fn -> 
+                let dir = Path.GetDirectoryName(fn)
+                let files = Directory.GetFiles(dir,"*.jpg") |> Array.sortBy Path.GetFileNameWithoutExtension
+                let i = Array.findIndex (fun f -> f=fn) files
+                if i >= 0 then 
+                    let op = if successor then 1 else files.Length-1
+                    let newFn = files.[(i+op)%files.Length]
+                    update model (SetPhotoFilename (false,Some newFn))
+                else model
+            | None -> model
+
+        | CameraMessage m -> 
+            {model with CameraModel= CameraController.update model.CameraModel m}
+        | SetPhotoFilename (bestfit,s) ->
+            match s with
+            | Some file ->
+                try 
+                    let p = PixImage.Create file
+                    
+                    let bounds = Box2d(V2d.Zero, V2d p.Size)
+
+                    let messages =
+                        [
+                            ParseFromJson
+                            CameraMessage (CameraController.SetSceneBounds bounds)
+                            if bestfit then CameraMessage (CameraController.BestFit bounds)
+                        ]
+
+                    let model = {model with PhotoFilename= Some file; Photo = Some p}
+                    (model, messages) ||> List.fold update
+                with e ->
+                    Log.warn "%A" e
+                    model
+            | None ->
+                { model with PhotoFilename=None; Photo = None }
         | AddControlPoint(ndc,px) -> 
             match model.PhotoFilename with
             | None -> Log.error "open a photo first!"; model
@@ -112,10 +144,10 @@ module App =
                         | Some oldDragged -> 
                             let ndcDir = dragCurrentNdc - dragStartNdc 
                             let newNdcUnclamped = cp.NdcPos + ndcDir
-                            let newNdc = V2d(clamp 0.0 1.0 newNdcUnclamped.X, clamp 0.0 1.0 newNdcUnclamped.Y)
+                            let newNdc = V2d(clamp -1.0 1.0 newNdcUnclamped.X, clamp -1.0 1.0 newNdcUnclamped.Y)
                             let pxDir = dragCurrentPx - dragStartPx
                             let newPxUnclamped = cp.PixelPos + pxDir
-                            let newPx = V2i(clamp 0 hackysizeBlurg.X newPxUnclamped.X, clamp 0 hackysizeBlurg.Y newPxUnclamped.Y)
+                            let newPx = model.CameraModel.sceneBounds.Clamped(newPxUnclamped)
                             {oldDragged with NdcPos=newNdc; PixelPos=newPx}
                     {model with MouseDragPreview=Some dragPreview}
                 | None -> model
@@ -124,7 +156,7 @@ module App =
             if left then 
                 let dist = 
                     (Some model.CurrentMousePosition,model.MouseDownPosition) ||> Option.map2 (fun (_,ci) (_,si) -> float <| Vec.distance ci si) |> Option.defaultValue System.Double.PositiveInfinity
-                if dist < 1.0 then 
+                if dist < 0.05 then 
                     let newModel = update model (AddControlPoint model.CurrentMousePosition)
                     {newModel with 
                         MouseDragStart = Model.initial.MouseDragStart
@@ -197,7 +229,7 @@ module App =
                     try 
                         Log.warn "try parse from %s" jsonFile
                         let json = File.readAllText jsonPath
-                        let data : System.Collections.Generic.List<{|name:string;ndcX:float;ndcY:float;pxX:int;pxY:int|}> = JsonSerializer.Deserialize json
+                        let data : System.Collections.Generic.List<{|name:string;ndcX:float;ndcY:float;pxX:float;pxY:float|}> = JsonSerializer.Deserialize json
                         let mutable li = 0
                         let hm =
                             data |> CSharpList.toList |> List.mapi (fun i e -> 
@@ -205,7 +237,7 @@ module App =
                                 i,{
                                     InternalIndex=i
                                     NdcPos=V2d(e.ndcX,e.ndcY)
-                                    PixelPos=V2i(e.pxX,e.pxY)
+                                    PixelPos=V2d(e.pxX,e.pxY)
                                     ParentPhotoName=photoFile
                                     Name=e.name
                                 }
@@ -217,22 +249,12 @@ module App =
                 else {model with ControlPoints=HashMap.empty;CurrentIndex=0}
         | Nop -> 
             model
-        | IncreaseZoomFactor -> 
-            if not model.ctrlDown then model 
-            else 
-                let newFactor = (model.zoomFactor+0.01)
-                {model with zoomFactor=clamp 0.01 10.0 newFactor}
-        | DecreaseZoomFactor -> 
-            if not model.ctrlDown then model 
-            else 
-                let newFactor = (model.zoomFactor-0.01)
-                {model with zoomFactor=clamp 0.01 10.0 newFactor}
         | SetCtrlDown b -> 
             {model with ctrlDown=b}
               
 
 
-    let view (m : AdaptiveModel) =
+    let view (send : Message -> unit) (m : AdaptiveModel) =
         let requires = 
             [
                 { name = "style.css"; url = "style.css"; kind = Stylesheet }
@@ -268,9 +290,7 @@ var dropped =
     };
 registerDrop(dropped);
 """
-
-        let pimg = m.PhotoFilename |> AVal.map (Option.map (fun fn -> PixImage.Create(fn)))
-
+        let pimg = m.Photo
         let itexture =
             pimg |> AVal.bind (fun img -> 
                 match img with 
@@ -279,28 +299,19 @@ registerDrop(dropped);
             )
 
         let imgSizes =
-            pimg |> AVal.map (fun img -> 
-                let s = img |> Option.map (fun pi -> pi.Size) |> Option.defaultValue (V2i(1024,1024))
-                hackysizeBlurg <- s
-                s
-            )
-        let zoomedImgSizes =
-            (m.zoomFactor,imgSizes) ||> AVal.map2 (fun z s -> V2i(int (float s.X * z),int (float s.Y * z)))
+            pimg |> AVal.map (fun img -> img |> Option.map (fun pi -> pi.Size) |> Option.defaultValue (V2i(256,256)))
+
         let verts =
             let hms = m.ControlPoints |> AMap.toAVal 
             (hms,m.MouseDragPreview)||> AVal.map2 (fun hm dragPre ->
                 let pos = 
                     hm |> HashMap.toArray |> Array.map snd |> Array.map (fun cp -> 
-                        let x = cp.NdcPos.X*2.0-1.0
-                        let y = -cp.NdcPos.Y*2.0+1.0
-                        V4f(float32 x, float32 y, 1.0f, 1.0f)
+                        V4f(float32 cp.NdcPos.X, float32 cp.NdcPos.Y, 1.0f, 1.0f)
                     )
                 match dragPre with 
                 | None -> pos 
                 | Some cp -> 
-                    let x = cp.NdcPos.X*2.0-1.0
-                    let y = -cp.NdcPos.Y*2.0+1.0
-                    Array.append pos [|V4f(float32 x, float32 y, 1.0f, 1.0f)|]
+                    Array.append pos [|V4f(float32 cp.NdcPos.X, float32 cp.NdcPos.Y, 1.0f, 1.0f)|]
                     
             )
         let cols =
@@ -322,24 +333,27 @@ registerDrop(dropped);
             let picSg = 
                 Sg.fullScreenQuad
                 |> Sg.shader {
+                    do! DefaultSurfaces.trafo
                     do! DefaultSurfaces.diffuseTexture
+                    do! Shader.myshader
                 }
                 |> Sg.diffuseTexture itexture
+                |> Sg.uniform "TextureSize" imgSizes
             let pass1 = (RenderPass.after "asds" RenderPassOrder.Arbitrary RenderPass.main)
             let pass2 = (RenderPass.after "asdgags" RenderPassOrder.Arbitrary pass1)
             let textSg =
-                let font = Font.create "Arial" FontStyle.Regular
-                let col = C4b.White
+                let font = FontSquirrel.Hack.Regular //Font.create "Arial" FontStyle.Regular
+                let col = C4b.Cyan
                 let cfg = TextConfig.create font col TextAlignment.Left true RenderStyle.Billboard
                 let trafosTexts = 
                     m.ControlPoints |> AMap.toAVal |> AVal.map (fun hm -> 
                         hm |> Seq.map (fun (idx,cp) -> 
-                            let x = cp.NdcPos.X*2.0-1.0
-                            let y = -cp.NdcPos.Y*2.0+1.0
-                            let shift = V2d(0.01,0.01)
+                            let x = cp.NdcPos.X
+                            let y = cp.NdcPos.Y
+                            let shift = V2d(0.005,0.005)
                             let trafo = 
                                 AVal.constant (
-                                    Trafo3d.Scale 0.05 *
+                                    Trafo3d.Scale 0.015 *
                                     Trafo3d.Translation (V3d(x+shift.X, y+shift.Y, 1.0))
                                 )
                             let text = AVal.constant cp.Name
@@ -356,6 +370,7 @@ registerDrop(dropped);
                 Sg.draw IndexedGeometryMode.PointList
                 |> Sg.vertexAttribute DefaultSemantic.Positions verts
                 |> Sg.shader {
+                    do! DefaultSurfaces.trafo
                     do! DefaultSurfaces.constantColor C4f.GreenYellow
                     do! DefaultSurfaces.pointSprite
                     do! DefaultSurfaces.pointSpriteFragment
@@ -369,6 +384,7 @@ registerDrop(dropped);
                 |> Sg.vertexAttribute DefaultSemantic.Positions verts
                 |> Sg.vertexAttribute DefaultSemantic.Colors cols
                 |> Sg.shader {
+                    do! DefaultSurfaces.trafo
                     do! DefaultSurfaces.vertexColor
                     do! DefaultSurfaces.pointSprite
                     do! DefaultSurfaces.pointSpriteFragment
@@ -378,28 +394,51 @@ registerDrop(dropped);
                 |> Sg.blendMode (AVal.constant BlendMode.Blend)
                 |> Sg.pass pass1
             Sg.ofList [picSg; vertsSgBlack; vertsSgGreen;textSg]
-            |> Sg.viewTrafo' Trafo3d.Identity
-            |> Sg.projTrafo' Trafo3d.Identity
+            |> Sg.trafo (
+                imgSizes |> AVal.map (fun s ->  
+                    Trafo3d.Scale(0.5, 0.5, 1.0) *
+                    Trafo3d.Translation(0.5, 0.5, 0.0) *
+                    Trafo3d.Scale(float s.X, float s.Y, 1.0)
+                )
+            )
 
-        let picViewRendercontrol =            
-            let dummyCam = 
-                AVal.constant <| {cameraView = CameraView.lookAt V3d.IOO V3d.OOO V3d.OOI; frustum = Frustum.ortho Box3d.Unit}
-            let sizesAttrib =
-                AList.ofAVal (zoomedImgSizes |> AVal.map (fun s -> 
-                    [style (sprintf "width:%dpx;height:%dpx" s.X s.Y)]
-                )) |> AttributeMap.ofAList
-            let remainingAttribs =
+
+        let picRendercontrol =
+            
+            let mutable initial = true
+
+            let callback (size : V2i) (frustum : Frustum) =
+                send (CameraMessage (CameraController.Resize size))
+                if initial then
+                    send (CameraMessage (CameraController.BestFit (AVal.force m.CameraModel.sceneBounds)))
+                    initial <- false
+                frustum
+
+            let atts =
                 AttributeMap.ofList [
                     clazz "picviewrendercontrol"
+                    onMouseLeave (fun _ -> SetMousePosition None)
+                    onMouseMoveAbs (fun e ->
+                        let m = AVal.force m.CameraModel.Current
+                        let wp = m.fromPixel e.pixel
+                        let imgSize = AVal.force imgSizes
+                        let ndc = (wp/V2d imgSize) * 2.0 - V2d.II
+                        [SetMousePosition (Some (ndc,wp))]
+                    )
+                    onPointerDownAbs (fun e ->
+                        if e.ctrl then [MouseDown (e.button = MouseButtons.Left)]
+                        else []
+                    )
+                    onPointerUpAbs (fun e ->
+                        if e.ctrl then [MouseUp (e.button = MouseButtons.Left)]
+                        else []
+                    )
                 ]
-            let attribs = AttributeMap.union sizesAttrib remainingAttribs
-            DomNode.RenderControl(
-                attribs,
-                dummyCam,
-                picViewSg,
-                RenderControlConfig.noScaling,
-                None
-            )
+            let atts = AttributeMap.union atts (CameraController.attributes (fun e -> not e.ctrl) (fun e -> e.ctrl) (AVal.constant m.CameraModel)
+                        |> AttributeMap.mapAttributes (AttributeValue.map CameraMessage))
+                
+            DomNode.RenderControl(m.CameraModel.camera, picViewSg, { adjustAspect = callback })
+                                    .WithAttributes atts
 
         let cpTable = 
             let tableAtts =
@@ -425,7 +464,7 @@ registerDrop(dropped);
                     ))))
                 Incremental.tr rowAtts (AList.ofList [
                     td [clazz "cpTd"] [button [onClick (fun _ -> RemoveControlPoint idx)] [text "❌"]]
-                    td [clazz "cpTd"] [text (sprintf "ndc=(%.4f,%.4f) px=(%d,%d)" cp.NdcPos.X cp.NdcPos.Y cp.PixelPos.X cp.PixelPos.Y)]
+                    td [clazz "cpTd"] [text (sprintf "ndc=(%.4f,%.4f) px=(%.2f,%.2f)" cp.NdcPos.X cp.NdcPos.Y cp.PixelPos.X cp.PixelPos.Y)]
                     td [clazz "cpTd"] [div [style "display:inline-block"] [
                         SimplePrimitives.textbox (TextConfig.empty) AttributeMap.empty (m.ControlPoints |> AMap.find idx |> AVal.map (fun ic -> ic.Name)) (fun ns -> UpdateControlPointName (idx,ns))
                         text (sprintf "name=%s" cp.Name)
@@ -433,42 +472,19 @@ registerDrop(dropped);
                 ])
             ))
 
-        let picview =
-            let atts =
-                AttributeMap.ofAList (AList.ofAVal ((imgSizes,zoomedImgSizes) ||> AVal.map2 (fun imgSize zoomedSize -> 
-                    [
-                        clazz "picview" 
-                        style (sprintf "width:%dpx;height:%dpx" zoomedSize.X zoomedSize.Y)
-                        onMouseLeave (fun _ -> SetMousePosition None)
-                        onMouseMoveRel (fun pn -> 
-                            let pi = V2i(int (float (pn.X*(float imgSize.X-0.5))),int (float (pn.Y*(float imgSize.Y-0.5))))
-                            SetMousePosition (Some (pn,pi))
-                        )
-                        onMouseDown (fun b _ -> match b with MouseButtons.Left -> MouseDown true | MouseButtons.Right -> MouseDown false | _ -> Nop)
-                        onMouseUp (fun b _ -> match b with MouseButtons.Left -> MouseUp true | MouseButtons.Right -> MouseUp false | _ -> Nop)
-                    ]
-                )))
-            let children = 
-                AList.ofList [
-                    picViewRendercontrol
-                ]
-            Incremental.div atts children
+        let picview = picRendercontrol
 
         let bodyAtts =
             [
-                onDrop (function [] -> Nop | pics -> pics |> List.head |> Some |> SetPhotoFilename)
-                onWheel (fun d -> if d.Y >= 0 then IncreaseZoomFactor else DecreaseZoomFactor)
-                onKeyDown (function Keys.LeftCtrl -> SetCtrlDown true | _ -> Nop)
+                onDrop (function [] -> Nop | pics -> pics |> List.head |> Some |> (fun fn -> SetPhotoFilename (true,fn)))
+                onKeyDown (function Keys.LeftCtrl -> SetCtrlDown true | Keys.Left -> NextFilename false | Keys.Right -> NextFilename true | _ -> Nop)
                 onKeyUp (function Keys.LeftCtrl -> SetCtrlDown false | _ -> Nop)
-                style "overflow-y:visible;overflow-x:visible;"
+                style "overflow-y:visible;overflow-x:visible;margin:0"
             ]
 
         let statusText =
             div [style "display:inline-block;"; clazz "descriptiontext"] [
                 div [] [text "Drop image here. LMB to add control point."]
-                Incremental.div (AttributeMap.ofAList (AList.ofAVal (m.ctrlDown |> AVal.map (fun b -> if b then [clazz "highlightedtext"] else [])))) (AList.ofList [
-                    text "Ctrl+Scroll to zoom. "
-                ])
                 div [] [Incremental.text (m.PhotoFilename |> AVal.map (Option.map Path.GetFileNameWithoutExtension >> Option.defaultValue "No photo loaded."))]
             ]
 
@@ -483,11 +499,11 @@ registerDrop(dropped);
             )
         )
 
-    let app =
+    let app (send : Message -> unit)=
         {
             initial = Model.initial
-            update = update
-            view = view
+            update = update send
+            view = view send
             threads = fun m -> ThreadPool.empty
             unpersist = Unpersist.instance
         }

@@ -6,13 +6,14 @@ open FSharp.Data.Adaptive
 open Aardvark.Base
 open Aardvark.UI.Primitives
 open Adaptify
+open punktEinzeichner
 
 type ControlPoint = 
     {
         InternalIndex : int
         Name : string
         ParentPhotoName : string
-        PixelPos : V2i
+        PixelPos : V2d
         NdcPos : V2d
     }
 
@@ -23,16 +24,20 @@ type Model =
         ControlPoints : HashMap<int,ControlPoint>
         CurrentlyHoveredPoint : Option<int>
         
-        MouseDownPosition : Option<V2d*V2i>
-        MouseDragStart : Option<V2d*V2i>
-        MouseDragCurrent : Option<V2d*V2i>
+        MouseDownPosition : Option<V2d*V2d>
+        MouseDragStart : Option<V2d*V2d>
+        MouseDragCurrent : Option<V2d*V2d>
         MouseDragPreview : Option<ControlPoint>
 
-        zoomFactor : float
-        CurrentMousePosition : V2d*V2i
+        CurrentMousePosition : V2d*V2d
         ctrlDown : bool
 
         PhotoFilename : Option<string>
+        Photo : Option<PixImage>
+
+        CameraModel : CameraModel
+        
+
     }
 
 module Model =
@@ -47,9 +52,11 @@ module Model =
             MouseDragCurrent = None
             MouseDragPreview = None
 
-            CurrentMousePosition = V2d.NN,V2i.NN
+            CurrentMousePosition = V2d.NN,V2d.NN
 
             PhotoFilename = None
-            zoomFactor = 0.1
+            Photo = None
             ctrlDown = false
+
+            CameraModel = CameraController.initial
         }

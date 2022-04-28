@@ -9,6 +9,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </EmbeddedResource>
     <EmbeddedResource Include="style.css" />
+    <Compile Include="Utilities.fs" />
+    <Compile Include="CameraModel.fs" />
+    <Compile Include="CameraController.fs" />
     <Compile Include="Model.fs">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Compile>
